@@ -10,7 +10,7 @@
 //! RustHound-CE is a cross-platform and cross-compiled BloodHound collector tool written in Rust, making it compatible with Linux, Windows, and macOS. It therefore generates all the JSON files that can be analyzed by BloodHound Community Edition. This version is only compatible with [BloodHound Community Edition](https://github.com/SpecterOps/BloodHound). The version compatible with [BloodHound Legacy](https://github.com/BloodHoundAD/BloodHound) can be found on [NeverHack's github](https://github.com/NH-RED-TEAM/RustHound).
 //!
 //! RustHound-CE can be use as a library. The pipeline is exposed as two composable
-//! functions, see [INTEGRATION.md](https://github.com/g0h4n/RustHound-CE/blob/main/INTEGRATION.md)
+//! functions, see [INTEGRATION.md](https://github.com/sliverarmory/RustHound-CE/blob/main/INTEGRATION.md)
 //! for the full guide.
 //!
 //! Authenticate, then run the whole collection:
@@ -58,6 +58,8 @@ pub mod transport;
 pub mod utils;
 pub mod api;
 pub mod modules;
+#[cfg(feature = "sliver-extension")]
+pub mod sliver_extension;
 
 pub mod enums;
 pub mod json;

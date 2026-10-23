@@ -591,17 +591,9 @@ fn ace_maker<T: LdapObject>(
                         "".to_string(),
                     ));
                 }
-                if ["EnterpriseCA","RootCA","CertTemplate"].contains(&entry_type)
-                    && has_extended_right(&ace, AUTO_ENROLL)
-                {
-                    relations.push(AceTemplate::new(
-                        sid.to_owned(),
-                        "".to_string(),
-                        "AutoEnroll".to_string(),
-                        is_inherited,
-                        "".to_string(),
-                    ));
-                }
+                // BloodHound CE schema v6 does not define AutoEnroll as an
+                // ACE right. Keep the ACL parser's GUID recognition, but do
+                // not emit an edge that rejects an otherwise valid ZIP.
             }
         }
 
@@ -867,7 +859,7 @@ pub fn parse_ca_security(
     // Hosting Computer local administrator group is the owner.
     relations.push(AceTemplate::new(
         hosting_computer_sid.to_owned() + "-544",
-        "LocalGroup".to_string(),
+        "ADLocalGroup".to_string(),
         "Owns".to_string(),
         false,
         "".to_string(),
@@ -904,7 +896,7 @@ pub fn parse_ca_security(
                                 // HostingComputer SID, need to add -544 for LocalGroup
                                 relations.push(AceTemplate::new(
                                     sid.to_owned() + "-544",
-                                    "LocalGroup".to_string(),
+                                    "ADLocalGroup".to_string(),
                                     "ManageCertificates".to_string(),
                                     false,
                                     "".to_string(),
@@ -926,7 +918,7 @@ pub fn parse_ca_security(
                                 // HostingComputer SID, need to add -544 for LocalGroup
                                 relations.push(AceTemplate::new(
                                     sid.to_owned() + "-544",
-                                    "LocalGroup".to_string(),
+                                    "ADLocalGroup".to_string(),
                                     "ManageCA".to_string(),
                                     false,
                                     "".to_string(),

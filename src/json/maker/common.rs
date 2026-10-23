@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use std::fs;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 use std::error::Error;
 
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -30,8 +30,60 @@ const SERIALIZE_BATCH: usize = 4096;
 /// Where a JSON collection is written: either straight into an entry of the
 /// shared zip archive, or into its own `.json` file on disk.
 enum Sink<'a> {
-    Zip { writer: &'a mut ZipWriter<BufWriter<File>>, datetime: &'a str, domain: &'a str },
+    Zip { writer: &'a mut dyn ZipSink, datetime: &'a str, domain: &'a str },
     Dir { path: &'a str, datetime: &'a str, domain: &'a str },
+}
+
+trait ZipSink: Write {
+    fn start_json_file(&mut self, name: &str) -> zip::result::ZipResult<()>;
+}
+
+impl<W: Write + Seek> ZipSink for ZipWriter<W> {
+    fn start_json_file(&mut self, name: &str) -> zip::result::ZipResult<()> {
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+        self.start_file(name, options)
+    }
+}
+
+/// Seekable, capacity-limited ZIP storage. The limit is enforced while ZIP
+/// entries are written, before an unbounded archive can accumulate in memory.
+struct BoundedZipBuffer {
+    inner: Cursor<Vec<u8>>,
+    max_bytes: usize,
+}
+
+impl BoundedZipBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self { inner: Cursor::new(Vec::new()), max_bytes }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.inner.into_inner()
+    }
+}
+
+impl Write for BoundedZipBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = (self.inner.position() as usize)
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("ZIP size overflow"))?;
+        if end > self.max_bytes {
+            return Err(std::io::Error::other("diskless ZIP size limit exceeded"));
+        }
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for BoundedZipBuffer {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
 }
 
 /// Stream one object collection as a BloodHound JSON document
@@ -43,7 +95,7 @@ enum Sink<'a> {
 fn write_json_document<T, W>(writer: &mut W, name: &str, vec_json: &[T]) -> std::io::Result<()>
 where
     T: LdapObject + Serialize + Sync,
-    W: Write,
+    W: Write + ?Sized,
 {
     let count = vec_json.len();
 
@@ -98,13 +150,10 @@ where
             // `large_file(true)` enables ZIP64, which is required for any entry
             // larger than 4 GiB. Without it the zip crate errors out on huge
             // domains, which is what caused the crash on large outputs.
-            let options = SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated)
-                .large_file(true);
             // Keep the original entry naming scheme: <datetime>_<domain>_<name>.json
             let filename = format!("{datetime}_{domain}_{name}.json");
             trace!("Adding file {}", filename.bold());
-            writer.start_file(&filename, options)?;
+            writer.start_json_file(&filename)?;
             write_json_document(*writer, name, vec_json)?;
         }
         Sink::Dir { path, datetime, domain } => {
@@ -181,4 +230,37 @@ pub fn make_a_zip(
 
     info!("{} created!", &final_path.bold());
     Ok(final_path)
+}
+
+/// Produce a BloodHound ZIP without touching the target filesystem.
+/// `max_bytes` bounds the archive itself; callers should separately bound the
+/// LDAP result set and hold the returned bytes only as long as needed.
+pub fn make_zip_bytes(
+    datetime: &str,
+    domain: &str,
+    ad_results: &crate::api::ADResults,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut writer = ZipWriter::new(BoundedZipBuffer::new(max_bytes));
+    {
+        let mut sink = Sink::Zip { writer: &mut writer, datetime, domain };
+        emit_all!(&mut sink, ad_results);
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_zip_is_valid_and_enforces_limit() {
+        let mut results = crate::api::ADResults::default();
+        results.domains.push(crate::objects::domain::Domain::new());
+        let bytes = make_zip_bytes("20261023", "example-local", &results, 1 << 20).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), 1);
+        assert!(archive.by_index(0).unwrap().name().ends_with("_domains.json"));
+        assert!(make_zip_bytes("20261023", "example-local", &results, 64).is_err());
+    }
 }
