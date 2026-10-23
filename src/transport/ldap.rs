@@ -418,8 +418,6 @@ fn ldap_constructor(
         debug!("Auth: certificate (Pass-the-Certificate)");
     } else if use_ntlm {
         debug!("Auth: NTLM pass-the-hash");
-    } else {
-        debug!("Password: {}", _s_password);
     }
     debug!("DC: {:?}", s_dc);
     debug!("Kerberos: {:?}", kerberos);

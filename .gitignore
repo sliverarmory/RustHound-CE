@@ -1,5 +1,6 @@
 target/
 *.json
+!extension.json
 *.zip
 *.exe
 datas/

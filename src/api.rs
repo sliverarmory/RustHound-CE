@@ -30,7 +30,7 @@ use crate::{
         schema::Schema,
     },
     transport::ldap::{LdapSearchEntry, collect_from_ldap_into},
-    storage::{DiskStorageReader, DiskStorage, EntrySource},
+    storage::{DiskStorageReader, DiskStorage, EntrySource, Storage},
     modules::run_modules,
     json::maker::make_result,
 };
@@ -567,4 +567,110 @@ pub async fn run_collection(
 
     run_modules(options, &mut results).await?;
     make_result(options, results)
+}
+
+/// Collect into a ZIP held entirely in memory. File-backed caches, credential
+/// files, and ccache-based Kerberos are rejected before any network operation.
+/// This is the entry point used by the Sliver native extension.
+pub async fn run_collection_to_zip(
+    ldap: &mut ldap3::Ldap,
+    options: &Options,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if options.cache || options.resume || options.pfx.is_some() || options.crt.is_some()
+        || options.key.is_some() || options.kerberos
+    {
+        return Err("diskless collection does not accept file-backed options".into());
+    }
+    if max_bytes == 0 {
+        return Err("diskless ZIP size limit must be positive".into());
+    }
+    // The compressed ZIP limit alone does not bound the LDAP result set.
+    // Cap estimated input payload and object count before parsing begins.
+    let mut entries = BoundedEntries::new(max_bytes.min(512 * 1024 * 1024), 1_000_000);
+    let total = collect_from_ldap_into(ldap, &options.ldap_filter, &mut entries).await?;
+    let mut results = prepare_results_from_source(entries.into_inner(), options, Some(total)).await?;
+    run_modules(options, &mut results).await?;
+    let domain = options.domain.replace('.', "-").to_lowercase();
+    let datetime = crate::utils::date::return_current_fulldate();
+    crate::json::maker::common::make_zip_bytes(&datetime, &domain, &results, max_bytes)
+}
+
+struct BoundedEntries {
+    entries: Vec<LdapSearchEntry>,
+    estimated_bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+impl BoundedEntries {
+    fn new(max_bytes: usize, max_entries: usize) -> Self {
+        Self { entries: Vec::new(), estimated_bytes: 0, max_bytes, max_entries }
+    }
+
+    fn into_inner(self) -> Vec<LdapSearchEntry> {
+        self.entries
+    }
+}
+
+impl Storage<LdapSearchEntry> for BoundedEntries {
+    fn buffer_mut(&mut self) -> &mut Vec<LdapSearchEntry> {
+        &mut self.entries
+    }
+
+    fn add(&mut self, entry: LdapSearchEntry) -> Result<(), Box<dyn Error>> {
+        if self.entries.len() >= self.max_entries {
+            return Err("diskless LDAP object count limit exceeded".into());
+        }
+        let estimate = estimate_entry_bytes(&entry);
+        self.estimated_bytes = self.estimated_bytes.checked_add(estimate)
+            .ok_or("diskless LDAP memory estimate overflow")?;
+        if self.estimated_bytes > self.max_bytes {
+            return Err("diskless LDAP input size limit exceeded".into());
+        }
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+}
+
+fn estimate_entry_bytes(entry: &LdapSearchEntry) -> usize {
+    let mut total = std::mem::size_of::<LdapSearchEntry>().saturating_add(entry.dn.len());
+    for (name, values) in &entry.attrs {
+        total = total.saturating_add(name.len() + 64);
+        for value in values {
+            total = total.saturating_add(value.len() + 32);
+        }
+    }
+    for (name, values) in &entry.bin_attrs {
+        total = total.saturating_add(name.len() + 64);
+        for value in values {
+            total = total.saturating_add(value.len() + 32);
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod diskless_tests {
+    use super::*;
+
+    fn entry() -> LdapSearchEntry {
+        LdapSearchEntry { dn: "CN=User,DC=example,DC=local".into(), attrs: HashMap::new(), bin_attrs: HashMap::new() }
+    }
+
+    #[test]
+    fn bounded_input_rejects_bytes_and_objects_before_push() {
+        let mut bytes = BoundedEntries::new(1, 2);
+        assert!(bytes.add(entry()).is_err());
+        assert!(bytes.entries.is_empty());
+
+        let mut objects = BoundedEntries::new(1024, 1);
+        objects.add(entry()).unwrap();
+        assert!(objects.add(entry()).is_err());
+        assert_eq!(objects.entries.len(), 1);
+    }
 }
