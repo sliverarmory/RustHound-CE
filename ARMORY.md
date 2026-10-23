@@ -45,6 +45,15 @@ extension will not prompt. Current-token SSPI is not yet supported. The
 credential lives only in the active worker, not in the run registry. Operators
 should be aware that Sliver may persist beacon task requests on its server.
 
+The current LDAP transport defaults to simple bind on port 389, which can send
+the password over the network without encryption. Setting `ldaps: true` uses
+TLS, but upstream RustHound currently disables DC certificate verification;
+therefore this mode encrypts traffic without authenticating the DC. Do not
+present the LDAPS option as a verified or authenticated connection. Use only
+under a network and credential policy that permits these properties. Verified
+LDAPS or StartTLS with operator-supplied trust roots requires a later transport
+change and its own GOAD validation.
+
 Read chunks are limited to 32,768 raw bytes so Base64 responses fit existing
 beacon task-content limits. ZIP output defaults to 256 MiB and cannot exceed
 1 GiB. LDAP input is capped at the smaller of the ZIP limit and 512 MiB,
