@@ -8,15 +8,16 @@ returns the ZIP in bounded callback responses. It never receives an output path.
 
 ## Build and package
 
-The release workflow builds the Windows MSVC DLL with:
+The release workflow builds the Windows GNU DLL with:
 
 ```sh
-cargo build --locked --release --target x86_64-pc-windows-msvc --lib \
+cargo build --locked --release --target x86_64-pc-windows-gnu --lib \
   --no-default-features --features nogssapi,sliver-extension
 ```
 
-For local cross builds, `x86_64-pc-windows-gnu` is also supported. Build a
-manual package with `python3 scripts/package_armory.py --dll <dll> --version
+This GNU target is the verified Reflektor build. The MSVC build uses static PE
+TLS storage that the current Reflektor memory loader does not initialize.
+Build a manual package with `python3 scripts/package_armory.py --dll <dll> --version
 2.5.29 --out <directory>`. The script writes an extension manifest containing
 the DLL SHA-256 and a deterministic `rusthound-ce.tar.gz` archive.
 
