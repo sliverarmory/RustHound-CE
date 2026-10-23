@@ -85,6 +85,7 @@ pub async fn run(
         .filter(|s| !s.is_empty())
         .or_else(|| args.ip.clone())
         .unwrap_or_else(|| args.domain.clone());
+    let current_user = args.current_user;
 
     // Probe with bounded concurrency.
     let results: Vec<(String, Outcome)> = stream::iter(targets)
@@ -98,7 +99,7 @@ pub async fn run(
                 let _permit = sem.acquire().await.unwrap();
                 let outcome = probe_host(
                     &host, &signin_domain, &user, &password,
-                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc,
+                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc, current_user,
                 ).await;
                 (oid, outcome)
             }
@@ -149,6 +150,7 @@ async fn probe_host(
     nt_hash: Option<&[u8; 16]>,
     kerberos_ccache: Option<&str>,
     kdc: &str,
+    current_user: bool,
 ) -> Outcome {
     // SharpHound-style reachability pre-check: 445 open within budget.
     if !is_reachable(host, DEFAULT_PORT_TIMEOUT_MS).await {
@@ -158,7 +160,12 @@ async fn probe_host(
 
     let work = async {
         // connect + SESSION_SETUP + tree-connect IPC$: Kerberos, or password / PtH.
-        let mut smb = if let Some(ccache) = kerberos_ccache {
+        let mut smb = if current_user {
+            match connect_ipc(host, domain, user, SmbAuth::CurrentUser).await {
+                Ok(c) => c,
+                Err(e) => return connect_error(host, &e),
+            }
+        } else if let Some(ccache) = kerberos_ccache {
             let spn = format!("cifs/{host}");
             let (gss_blob, session_key) =
                 match crate::transport::kerberos::kerberos_material_for(ccache, &spn, kdc).await {

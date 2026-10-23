@@ -23,9 +23,9 @@ jobs:
           choco install mingw -y --no-progress
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
       - name: Test diskless library and extension protocol
-        run: cargo test --locked --lib --no-default-features --features nogssapi,sliver-extension
+        run: cargo test --locked --lib --features sliver-extension
       - name: Build Windows amd64 GNU extension
-        run: cargo build --locked --release --target x86_64-pc-windows-gnu --lib --no-default-features --features nogssapi,sliver-extension
+        run: cargo build --locked --release --target x86_64-pc-windows-gnu --lib --features sliver-extension
       - name: Stage DLL
         shell: pwsh
         run: |

@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "rusthound-ce"
-version = "2.5.29"
+version = "2.5.30"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3017,6 +3017,7 @@ dependencies = [
  "tokio",
  "trust-dns-resolver",
  "windows-sddl",
+ "windows-sys 0.61.2",
  "winreg 0.52.0",
  "x509-parser 0.16.0",
  "zip",

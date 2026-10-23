@@ -16,3 +16,9 @@ pub mod smb;
 pub mod gss;
 pub mod kerberos;
 pub mod cert;
+#[cfg(windows)]
+pub mod windows_auth;
+#[cfg(windows)]
+pub mod windows_domain;
+#[cfg(windows)]
+pub(crate) mod windows_registry;

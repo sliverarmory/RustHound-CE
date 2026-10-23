@@ -1,6 +1,6 @@
 //! SMB transport for RustHound-CE.
 //!
-//! `connect_authenticated` only does TCP 445 and the NTLM SESSION_SETUP, then
+//! `connect_authenticated` does TCP 445 and an authenticated SESSION_SETUP, then
 //! hands back an authenticated SmbClient with no tree bound. Callers then tree
 //! connect the share they need:
 //!   * IPC$   for MS RPC pipes (SRVSVC, WKSSVC, WINREG) used by the sessions
@@ -32,6 +32,8 @@ pub enum SmbAuth<'a> {
     /// Pass-the-ticket: SPNEGO AP-REQ blob + 16 byte SMB session key
     /// already built for this host's cifs/<host> SPN.
     Kerberos { gss_blob: &'a [u8], session_key: &'a [u8; 16] },
+    /// Windows SSPI: authenticate with the process user's logon credentials.
+    CurrentUser,
 }
 
 /// UNC of the IPC$ share (MS RPC pipes).
@@ -64,7 +66,8 @@ pub async fn connect_authenticated(
     })?;
     debug!("[{host}] SMB connected, negotiate done");
 
-    // SESSION_SETUP: password or pass the hash.
+    // SESSION_SETUP: password, pass the hash, supplied ticket, or Windows logon.
+    let current_user = matches!(&auth, SmbAuth::CurrentUser);
     match auth {
         SmbAuth::Hash(nt) => {
             trace!("[{host}] SMB SESSION_SETUP as {domain}\\{user} (pass the hash)");
@@ -87,8 +90,30 @@ pub async fn connect_authenticated(
                 anyhow::anyhow!("auth(krb): {e}")
             })?;
         }
+        SmbAuth::CurrentUser => {
+            #[cfg(windows)]
+            {
+                // SSPI can contact the KDC; keep its blocking work off Tokio's
+                // network workers. The AP-REQ is generated for this SMB host.
+                let target = host.to_owned();
+                let (gss_blob, session_key) = tokio::task::spawn_blocking(move || {
+                    super::windows_auth::current_user_smb_material(&target)
+                })
+                .await??;
+                smb.login_kerberos(&gss_blob, &session_key).await.map_err(|e| {
+                    error!("[{host}] SMB current-user Kerberos auth failed: {e}");
+                    anyhow::anyhow!("auth(current-user): {e}")
+                })?;
+            }
+            #[cfg(not(windows))]
+            return Err(anyhow::anyhow!("current-user SMB authentication requires Windows"));
+        }
     }
-    debug!("[{host}] SMB authenticated as {domain}\\{user}");
+    if current_user {
+        debug!("[{host}] SMB authenticated with current Windows logon credentials");
+    } else {
+        debug!("[{host}] SMB authenticated as {domain}\\{user}");
+    }
 
     Ok(smb)
 }

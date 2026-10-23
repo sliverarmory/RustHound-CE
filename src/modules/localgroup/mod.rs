@@ -82,6 +82,7 @@ pub async fn run(
         .filter(|s| !s.is_empty())
         .or_else(|| args.ip.clone())
         .unwrap_or_else(|| args.domain.clone());
+    let current_user = args.current_user;
 
     let findings: Vec<HostFindings> = stream::iter(targets)
         .map(|(host, computer_sid)| {
@@ -94,7 +95,7 @@ pub async fn run(
                 let _permit = sem.acquire().await.unwrap();
                 enumerate_host(
                     &host, computer_sid, &domain, &signin_domain, &user, &password,
-                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc,
+                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc, current_user,
                 )
                 .await
             }
@@ -128,6 +129,7 @@ async fn enumerate_host(
     nt_hash: Option<&[u8; 16]>,
     kerberos_ccache: Option<&str>,
     kdc: &str,
+    current_user: bool,
 ) -> HostFindings {
     if !is_reachable(host, DEFAULT_PORT_TIMEOUT_MS).await {
         trace!("[{host}] 445/tcp unreachable - skip");
@@ -146,7 +148,10 @@ async fn enumerate_host(
         let mut is_dc = false;
 
         let fatal: Result<(), String> = async {
-            let mut smb = if let Some(ccache) = kerberos_ccache {
+            let mut smb = if current_user {
+                connect_ipc(host, signin_domain, user, SmbAuth::CurrentUser)
+                    .await.map_err(|e| format!("{host}: {e}"))?
+            } else if let Some(ccache) = kerberos_ccache {
                 let spn = format!("cifs/{host}");
                 let (gss_blob, session_key) =
                     crate::transport::kerberos::kerberos_material_for(ccache, &spn, kdc)

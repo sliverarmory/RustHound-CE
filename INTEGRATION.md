@@ -50,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1) Prepare RustHound-CE options
     let options = Options {
         domain: "essos.local".to_string(),
+        current_user: false,
         username: Some("daenerys.targaryen@essos.local".to_string()),
         password: Some("BurnThemAll!".to_string()),
         ldapfqdn: Some("meereen.essos.local".to_string()),
@@ -101,6 +102,7 @@ async fn collect(ldap: &mut ldap3::Ldap) -> Result<(), Box<dyn std::error::Error
 
     let options = Options {
         domain: "essos.local".to_string(),
+        current_user: false,
         username: None,
         password: None,
         ldapfqdn: Some("meereen.essos.local".to_string()),
@@ -140,6 +142,7 @@ async fn collect(ldap: &mut ldap3::Ldap) -> Result<(), Box<dyn std::error::Error
 | Field | Meaning |
 |---|---|
 | `domain` | target domain, e.g. `essos.local` |
+| `current_user` | Windows only: use the process logon for LDAP, SMB, and remote registry access; set `domain` and `ldapfqdn` in library calls |
 | `username` / `password` | simple bind credentials |
 | `hashes` | NT hash for pass-the-hash (`NTHASH`, `:NTHASH`, or `LMHASH:NTHASH`) |
 | `kerberos` | use a Kerberos ticket from `KRB5CCNAME` |

@@ -7,8 +7,8 @@
 //!   RoleSeparationEnabled (config) -> RoleSeparationEnabled       (informational; no BloodHound edge today)
 //!
 //! dcerpc's `RegistryClient` binds with a password or an
-//! NT hash only (it has no Kerberos bind yet), reusing the same SMB transport
-//! as the sessions module.
+//! NT hash, reusing the same SMB transport as the sessions module. Current-user
+//! mode uses Windows Remote Registry directly.
 //!
 //! All decisions that can be made without a Domain Controller live in
 //! [`super::types`]; this file only turns a live read into a [`types::ValueRead`].
@@ -21,6 +21,8 @@ use smb2_client::SmbClient;
 
 use crate::modules::registry::types::{self, ValueRead};
 use crate::transport::smb::{connect_ipc, is_reachable, SmbAuth};
+#[cfg(windows)]
+use crate::transport::windows_registry::RemoteRegistry;
 
 /// The two per-CA value reads, as pure [`ValueRead`]s ready for the outcome
 /// mapping in [`super::types`].
@@ -37,6 +39,43 @@ impl CaReads {
             user_specifies_san: ValueRead::Failed(reason.clone()),
             role_separation: ValueRead::Failed(reason),
         }
+    }
+}
+
+/// Read the same values through Windows Remote Registry using the process's
+/// current logon session. The Windows registry APIs block, so keep them off
+/// Tokio workers and retain the existing per-CA collection budget.
+#[cfg(windows)]
+pub async fn collect_current_user(host: &str, ca_name: &str) -> CaReads {
+    if !is_reachable(host, super::DEFAULT_PORT_TIMEOUT_MS).await {
+        return CaReads::both_failed(format!("{host}: 445/tcp unreachable"));
+    }
+    let host_owned = host.to_string();
+    let ca_owned = ca_name.to_string();
+    let task = tokio::task::spawn_blocking(move || read_current_user(&host_owned, &ca_owned));
+    match timeout(Duration::from_millis(super::DEFAULT_PER_CA_TIMEOUT_MS), task).await {
+        Ok(Ok(reads)) => reads,
+        Ok(Err(err)) => CaReads::both_failed(format!("{host}: Remote Registry worker failed: {err}")),
+        Err(_) => CaReads::both_failed(format!("{host}: per-CA timeout")),
+    }
+}
+
+#[cfg(windows)]
+fn read_current_user(host: &str, ca_name: &str) -> CaReads {
+    let reg = match RemoteRegistry::connect_hklm(host) {
+        Ok(reg) => reg,
+        Err(err) => return CaReads::both_failed(format!("{host}: {err}")),
+    };
+    fn classify(read: Result<Option<u32>, String>) -> ValueRead {
+        match read {
+            Ok(Some(value)) => ValueRead::Dword(value),
+            Ok(None) => ValueRead::Absent,
+            Err(err) => ValueRead::Failed(err),
+        }
+    }
+    CaReads {
+        user_specifies_san: classify(reg.read_dword(&types::policy_module_subkey(ca_name), types::EDIT_FLAGS)),
+        role_separation: classify(reg.read_dword(&types::configuration_subkey(ca_name), types::ROLE_SEPARATION_ENABLED)),
     }
 }
 

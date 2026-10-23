@@ -13,6 +13,7 @@ use log::{error, info, trace};
 
 use rusthound_ce::{args, ldap_auth, api::run_collection, utils};
 use std::error::Error;
+use std::time::Duration;
 
 #[cfg(feature = "noargs")]
 use args::auto_args;
@@ -22,8 +23,19 @@ use args::{extract_args, Options};
 use banner::{print_banner, print_end_banner};
 
 /// Main of RustHound
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // RegConnectRegistryW is a blocking Win32 call. A timed-out remote
+    // registry request may still be running on Tokio's blocking pool, so do
+    // not let it keep the CLI process alive indefinitely after collection.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    result
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     // Banner
     print_banner();
 
@@ -46,13 +58,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut ldap = ldap_auth(&common_args).await?;
 
     // 2) Run the full workflow (collect -> parse -> modules -> JSON/zip).
-    match run_collection(&mut ldap, &common_args).await {
-        Ok(out) => trace!("Output written to {out}"),
-        Err(err) => error!("Collection failed. Reason: {err}"),
-    }
+    let result = run_collection(&mut ldap, &common_args).await;
 
     // Close the session.
     let _ = ldap.unbind().await;
+
+    match result {
+        Ok(out) => trace!("Output written to {out}"),
+        Err(err) => {
+            error!("Collection failed. Reason: {err}");
+            return Err(err);
+        }
+    }
 
     // End banner
     print_end_banner();

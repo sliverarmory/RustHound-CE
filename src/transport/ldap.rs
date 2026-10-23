@@ -22,10 +22,28 @@ use std::error::Error;
 
 /// Connect to the DC and authenticate, returning a ready `ldap3::Ldap` session.
 /// The method is picked from `options`: certificate (`pfx` or `crt`/`key`),
-/// NTLM pass-the-hash (`hashes`), Kerberos (`kerberos`), else simple bind.
+/// NTLM pass-the-hash (`hashes`), Kerberos (`kerberos` or `current_user`),
+/// else simple bind.
 /// Certificate auth defaults to StartTLS on 389, or LDAPS 636 with `--ldaps`.
 /// The caller owns the session (never unbound here).
 pub async fn ldap_auth(options: &Options) -> Result<ldap3::Ldap, Box<dyn Error>> {
+    if options.current_user {
+        if options.username.is_some() || options.password.is_some() || options.hashes.is_some()
+            || options.kerberos || options.pfx.is_some() || options.pfx_pass.is_some()
+            || options.crt.is_some() || options.key.is_some()
+        {
+            return Err("current-user authentication cannot be combined with explicit credentials or certificate authentication".into());
+        }
+        if !cfg!(windows) {
+            return Err("current-user authentication requires Windows".into());
+        }
+        if cfg!(feature = "nogssapi") {
+            return Err("current-user authentication requires a build with LDAP GSSAPI support".into());
+        }
+        if options.ldapfqdn.as_deref().unwrap_or_default().is_empty() {
+            return Err("current-user authentication requires a DNS-named DC (set --ldapfqdn)".into());
+        }
+    }
     let use_cert = options.pfx.is_some() || options.crt.is_some();
 
     // Certificate transport: StartTLS by default, LDAPS with --ldaps.
@@ -39,14 +57,18 @@ pub async fn ldap_auth(options: &Options) -> Result<ldap3::Ldap, Box<dyn Error>>
 
     let ldap_args = ldap_constructor(
         effective_ldaps,
-        options.ip.as_deref(),
+        if options.current_user {
+            options.ip.as_deref().or(options.ldapfqdn.as_deref())
+        } else {
+            options.ip.as_deref()
+        },
         effective_port,
         &options.domain,
         options.ldapfqdn.as_deref(),
         options.username.as_deref(),
         options.password.as_deref(),
         options.hashes.as_deref(),
-        options.kerberos,
+        options.kerberos || options.current_user,
         use_cert,
     )?;
 
@@ -113,7 +135,7 @@ pub async fn ldap_auth(options: &Options) -> Result<ldap3::Ldap, Box<dyn Error>>
             .success()
             .map_err(|e| format!("NTLM authentication to {} failed: {e}", domain.to_uppercase()))?;
         info!("Connected to {} Active Directory via NTLM!", domain.to_uppercase().bold().green());
-    } else if !options.kerberos {
+    } else if !options.kerberos && !options.current_user {
         debug!("Simple bind (username:password)");
         ldap.simple_bind(&ldap_args.s_username, &ldap_args.s_password)
             .await?
@@ -121,7 +143,7 @@ pub async fn ldap_auth(options: &Options) -> Result<ldap3::Ldap, Box<dyn Error>>
             .map_err(|e| format!("authentication to {} failed: {e}", domain.to_uppercase()))?;
         info!("Connected to {} Active Directory!", domain.to_uppercase().bold().green());
     } else {
-        debug!("Kerberos (sasl_gssapi_bind)");
+        debug!("Kerberos (sasl_gssapi_bind; current Windows logon: {})", options.current_user);
         let fqdn = options
             .ldapfqdn
             .as_deref()

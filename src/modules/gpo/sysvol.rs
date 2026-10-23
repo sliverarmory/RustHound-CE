@@ -88,6 +88,13 @@ pub async fn collect_sysvol_targets(common_args: &Options, scope: &ComputerGpoSc
         return Ok(Vec::new());
     }
 
+    if common_args.current_user {
+        return collect(
+            &dc_host, &common_args.domain, &signin_domain, &user,
+            SmbAuth::CurrentUser, scope,
+        ).await;
+    }
+
     // Kerberos: build a cifs/<dc> ticket from KRB5CCNAME when --kerberos is set.
     if common_args.kerberos {
         let ccache = std::env::var("KRB5CCNAME")

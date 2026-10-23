@@ -2,16 +2,11 @@
 #[cfg(not(feature = "noargs"))]
 use clap::{Arg, ArgAction, value_parser, Command};
 
-#[cfg(feature = "noargs")]
-use winreg::{RegKey,{enums::*}};
-#[cfg(feature = "noargs")]
-use crate::utils::exec::run;
-#[cfg(feature = "noargs")]
-use regex::Regex;
-
 #[derive(Clone, Debug)]
 pub struct Options {
     pub domain: String,
+    /// Authenticate with the logged-in Windows user's network credentials.
+    pub current_user: bool,
     pub username: Option<String>,
     pub password: Option<String>,
     pub ldapfqdn: Option<String>,
@@ -90,7 +85,7 @@ fn cli() -> Command {
         .short('d')
         .long("domain")
             .help("Domain name like: DOMAIN.LOCAL")
-            .required(true)
+            .required_unless_present("current-user")
             .value_parser(value_parser!(String))
     )
     .next_help_heading("OPTIONAL VALUES")
@@ -176,6 +171,12 @@ fn cli() -> Command {
         .value_parser(value_parser!(String))
     )
     .next_help_heading("OPTIONAL FLAGS")
+    .arg(Arg::new("current-user")
+        .long("current-user")
+        .help("Windows only: use the logged-in domain user's credentials and discover the domain/DC automatically")
+        .action(ArgAction::SetTrue)
+        .conflicts_with_all(["ldapusername", "ldappassword", "hashes", "kerberos", "pfx", "pfx-pass", "crt", "key"])
+    )
     .arg(Arg::new("collectionmethod")
         .short('c')
         .long("collectionmethod")
@@ -256,13 +257,38 @@ fn cli() -> Command {
 pub fn extract_args() -> Options {
 
     // Get arguments
+    #[cfg(windows)]
+    let matches = {
+        let mut argv: Vec<_> = std::env::args_os().collect();
+        if argv.len() == 1 {
+            argv.push("--current-user".into());
+        }
+        cli().get_matches_from(argv)
+    };
+    #[cfg(not(windows))]
     let matches = cli().get_matches();
 
     // Now get values
-    let d = matches
-        .get_one::<String>("domain")
-        .map(|s| s.as_str())
-        .unwrap();
+    let current_user = matches.get_flag("current-user");
+    #[allow(unused_mut)]
+    let mut domain = matches.get_one::<String>("domain").cloned().unwrap_or_default();
+    #[allow(unused_mut)]
+    let mut discovered_dc = None;
+    if current_user {
+        #[cfg(windows)]
+        {
+            let discovered = crate::transport::windows_domain::discover_domain_controller(
+                if domain.is_empty() { None } else { Some(&domain) },
+            ).unwrap_or_else(|e| cli().error(clap::error::ErrorKind::InvalidValue, e).exit());
+            if domain.is_empty() {
+                domain = discovered.domain;
+            }
+            discovered_dc = Some(discovered.dc_fqdn);
+        }
+        #[cfg(not(windows))]
+        cli().error(clap::error::ErrorKind::InvalidValue,
+            "--current-user requires a Windows build").exit();
+    }
     let username = matches
         .get_one::<String>("ldapusername")
         .map(|s| s.to_owned());
@@ -272,7 +298,7 @@ pub fn extract_args() -> Options {
     let hashes = matches
         .get_one::<String>("hashes")
         .map(|s| s.to_owned());
-    let f = matches.get_one::<String>("ldapfqdn").cloned();
+    let f = matches.get_one::<String>("ldapfqdn").cloned().or(discovered_dc);
     let ip = matches.get_one::<String>("ldapip").cloned();    
     let port = match matches.get_one::<String>("ldapport") {
         Some(val) => val.parse::<u16>().ok(),
@@ -345,7 +371,8 @@ pub fn extract_args() -> Options {
 
     // Return all
     Options {
-        domain: d.to_string(),
+        domain,
+        current_user,
         username,
         password,
         hashes,
@@ -375,57 +402,26 @@ pub fn extract_args() -> Options {
 #[cfg(feature = "noargs")]
 /// Function to automatically get all informations needed and put it in 'Options' structure.
 pub fn auto_args() -> Options {
-
-    // Request registry key to get informations
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let cur_ver = hklm.open_subkey("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters").unwrap();
-    //Computer\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Domain
-    let domain: String = match cur_ver.get_value("Domain") {
-        Ok(domain) => domain,
-        Err(err) => {
-            panic!("Error: {:?}",err);
-        }
-    };
-    
-    // Get LDAP fqdn
-    let _fqdn: String = run(&format!("nslookup -query=srv _ldap._tcp.{}",&domain));
-    let re = Regex::new(r"hostname.*= (?<ldap_fqdn>[0-9a-zA-Z]{1,})").unwrap();
-    let mut values =  re.captures_iter(&_fqdn);
-    let caps = values.next().unwrap();
-    let fqdn = caps["ldap_fqdn"].to_string();
-
-    // Get LDAP port
-    let re = Regex::new(r"port.*= (?<ldap_port>[0-9]{3,})").unwrap();
-    let mut values =  re.captures_iter(&_fqdn);
-    let caps = values.next().unwrap();
-    let port = match caps["ldap_port"].to_string().parse::<u16>() {
-        Ok(x) => Some(x),
-        Err(_) => None
-    };
-    let ldaps: bool = {
-        if let Some(p) = port {
-            p == 636
-        } else {
-            false
-        }
-    };
+    let discovered = crate::transport::windows_domain::discover_domain_controller(None)
+        .expect("could not discover the joined Windows domain and DC");
 
     // Return all
     Options {
-        domain: domain.to_string(),
-        username: "not set".to_string(),
-        password: "not set".to_string(),
-        ldapfqdn: Some(fqdn.to_string()),
+        domain: discovered.domain,
+        current_user: true,
+        username: None,
+        password: None,
+        ldapfqdn: Some(discovered.dc_fqdn),
         ip: None, 
-        port: port,
+        port: None,
         name_server: "127.0.0.1".to_string(),
         path: "./output".to_string(),
         collection_method: CollectionMethod::All,
-        ldaps: ldaps,
+        ldaps: false,
         dns_tcp: false,
         fqdn_resolver: false,
         hashes: None,
-        kerberos: true,
+        kerberos: false,
         pfx: None,
         pfx_pass: None,
         crt: None,
@@ -442,6 +438,17 @@ pub fn auto_args() -> Options {
 #[cfg(test)]
 mod tests {
     use super::CollectionMethod::*;
+
+    #[cfg(not(feature = "noargs"))]
+    #[test]
+    fn current_user_cli_accepts_discovery_and_rejects_explicit_credentials() {
+        assert!(super::cli().try_get_matches_from(["rusthound-ce", "--current-user"]).is_ok());
+        assert!(super::cli().try_get_matches_from(["rusthound-ce", "-d", "example.local"]).is_ok());
+        assert!(super::cli().try_get_matches_from(["rusthound-ce"]).is_err());
+        assert!(super::cli().try_get_matches_from([
+            "rusthound-ce", "--current-user", "--ldappassword", "secret",
+        ]).is_err());
+    }
 
     #[test]
     fn session_module_runs_for_every_method_that_makes_a_session_call() {

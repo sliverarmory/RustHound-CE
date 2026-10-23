@@ -23,7 +23,7 @@
 //! Kerberos ticket (pass the ticket) when --kerberos is set. Kerberos material
 //! is built per host, since the AP-REQ targets that host's cifs/<host> SPN.
 //! WINREG is the exception: it binds `\winreg` with NTLM (password or NT hash)
-//! only, and without either it is skipped.
+//! only unless current-user mode uses native Windows Remote Registry.
 //!
 //! The target host is the computer FQDN (properties.name, from dNSHostName).
 //! We do NOT use the fqdn->ip map: connections go to the FQDN and rely on DNS.
@@ -43,6 +43,8 @@ use dcerpc::wkssvc::{WkstaUser, WkstaUserClient};
 use smb2_client::SmbClient;
 use crate::transport::smb::{connect_ipc, is_reachable, open_rpc_pipe, smb_identity, SmbAuth};
 use crate::modules::registry::{rrp_bind_unavailable, RRP_NEEDS_SECRET};
+#[cfg(windows)]
+use crate::transport::windows_registry::RemoteRegistry;
 
 use crate::args::{CollectionMethod, Options};
 use crate::objects::common::{Session, UserComputerSession};
@@ -194,15 +196,16 @@ pub async fn run(
         .or_else(|| args.ip.clone())
         .unwrap_or_else(|| args.domain.clone());
 
-    // The WINREG read binds with NTLM (password or NT hash) whatever SMB used,
-    // so with neither (e.g. -k without -p/-H) it can't succeed: don't attempt it.
-    let skip_reason = registry_skip(&method, &password, nt_hash.as_ref());
+    // The dcerpc WINREG path needs an explicit password or hash. Windows
+    // current-user mode uses native Remote Registry instead.
+    let skip_reason = if args.current_user { None } else { registry_skip(&method, &password, nt_hash.as_ref()) };
     if skip_reason.is_some() {
         info!("[sessions] no password or NT hash available - not reading registry sessions on {} host(s)",
               targets.len());
     }
 
     trace!("[sessions] starting concurrent enumeration (concurrency={DEFAULT_CONCURRENCY})");
+    let current_user = args.current_user;
     let findings: Vec<HostFindings> = stream::iter(targets)
         .map(|(host, computer_sid)| {
             let (sem, signin_domain, user, password, method) =
@@ -216,7 +219,7 @@ pub async fn run(
                 trace!("[sessions] [{host}] permit acquired, entering enumerate_host");
                 let hf = enumerate_host(
                     &host, computer_sid, &signin_domain, &user, &password,
-                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc, &method, skip_reason,
+                    nt_hash.as_ref(), kerberos_ccache.as_deref(), &kdc, &method, skip_reason, current_user,
                 ).await;
                 trace!("[sessions] [{host}] enumerate_host returned ({} error(s))", hf.errors().len());
                 hf
@@ -250,6 +253,7 @@ async fn enumerate_host(
     kdc: &str,
     method: &CollectionMethod,
     registry_skip: Option<&str>,
+    current_user: bool,
 ) -> HostFindings {
     let mut hf = HostFindings::new(computer_sid, method);
     if let Some(reason) = registry_skip {
@@ -269,14 +273,41 @@ async fn enumerate_host(
         return hf;
     }
 
+    // Windows Remote Registry uses the current logon session directly. Run it
+    // independently of the SMB/RPC connection below, so an SMB auth failure
+    // cannot erase a successfully collected HKU result.
+    if current_user && matches!(hf.registry, Call::Pending) {
+        #[cfg(windows)]
+        {
+            let host_owned = host.to_string();
+            let task = tokio::task::spawn_blocking(move || {
+                RemoteRegistry::connect_hku(&host_owned)?.logged_on_sids()
+            });
+            hf.registry = match timeout(Duration::from_millis(DEFAULT_HOST_TIMEOUT_MS), task).await {
+                Ok(Ok(Ok(sids))) => Call::Done(sids.into_iter().map(|sid| RegistrySession { sid }).collect()),
+                Ok(Ok(Err(err))) => Call::Failed(format!("{host} WINREG: {err}")),
+                Ok(Err(err)) => Call::Failed(format!("{host} WINREG worker failed: {err}")),
+                Err(_) => Call::Failed(format!("{host} WINREG: per-host timeout")),
+            };
+        }
+        #[cfg(not(windows))]
+        unreachable!("current-user mode is only available on Windows");
+    }
+    if !hf.has_pending() {
+        return hf;
+    }
+
     // The RPC body writes each call's outcome into `hf` as soon as it finishes,
     // so a per-host timeout keeps the calls that already completed.
     let work = async {
         // Inner block uses `?` for the fatal connect/auth/tree steps; the error
         // becomes the FailureReason of every call that hasn't run yet.
         let fatal: Result<(), String> = async {
-            // connect + SESSION_SETUP: Kerberos ticket, or password / pass the hash.
-            let mut smb = if let Some(ccache) = kerberos_ccache {
+            // Connect with the selected SMB authentication method.
+            let mut smb = if current_user {
+                connect_ipc(host, signin_domain, user, SmbAuth::CurrentUser)
+                    .await.map_err(|e| format!("{host}: {e}"))?
+            } else if let Some(ccache) = kerberos_ccache {
                 // Kerberos: build a cifs/<host> ticket for THIS host.
                 let spn = format!("cifs/{host}");
                 let (gss_blob, session_key) =
@@ -622,7 +653,7 @@ mod tests {
 
     async fn enumerate_without_secret(method: &CollectionMethod) -> HostFindings {
         enumerate_host(NO_HOST, COMPUTER_SID.to_string(), "EXAMPLE", "alice", "", None,
-                       None, "dc01.example.local", method, registry_skip(method, "", None)).await
+                       None, "dc01.example.local", method, registry_skip(method, "", None), false).await
     }
 
     #[tokio::test]

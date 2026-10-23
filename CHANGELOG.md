@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.30 - 2026-10-23
+
+### Added
+
+- Windows `--current-user` collection authenticates LDAP and SMB with the current logon, discovers the joined domain and a domain controller, and supports direct no-argument execution on a domain-joined host.
+- The Sliver Armory extension accepts `currentUser: true` without an operator-supplied username or password and uses the same Windows logon for collection.
+
+### Changed
+
+- The Windows GNU Armory DLL now includes LDAP GSSAPI support so the current-user mode can authenticate to Active Directory. The release remains signed with the Armory Minisign key.
+
 ## 2.5.28 - 2026-10-22
 
 Make the `ChildObjects` and `gPLink` resolution checker passes linear instead of quadratic ([#101](https://github.com/g0h4n/RustHound-CE/issues/101)). `add_childobjects_members` and `replace_guid_gplink` in `src/json/checker/common.rs` compared every OU, domain and container (resp. every gPLink GUID) against every `dn_sid` entry. Both now match with a single **Aho-Corasickù** automaton in one pass, **on a generated 203k-object domain they drop from 71.5s to 0.52s**, and scale linearly from there. Output is identical, element for element and in the same order. Adds `aho-corasick` as a direct dependency (already in the tree via `regex`). Thanks a lot to [marbas207](https://github.com/marbas207) for this clean and well-tested contribution! More information directly from the pull request [#103](https://github.com/g0h4n/RustHound-CE/pull/103)

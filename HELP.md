@@ -12,6 +12,7 @@
   - [How to build documentation?](#how-to-build-documentation)
 - [Usage](#usage)
   - [Simple usage](#simple-usage)
+  - [Current Windows user](#current-windows-user)
   - [Pass-the-Certificate](#pass-the-certificate-certificate-authentication)
   - [Using disk instead of memory](#using-disk-instead-of-memory)
   - [Module FQDN resolver](#module-fqdn-resolver)
@@ -208,14 +209,14 @@ cargo doc --open --no-deps
 Active Directory data collector for BloodHound Community Edition.
 g0h4n <https://twitter.com/g0h4n_0>
 
-Usage: rusthound-ce [OPTIONS] --domain <domain>
+Usage: rusthound-ce [OPTIONS] [--domain <domain>]
 
 Options:
   -v...          Set the level of verbosity
   -h, --help     Print help
   -V, --version  Print version
 
-REQUIRED VALUES:
+REQUIRED VALUES (unless --current-user on Windows):
   -d, --domain <domain>  Domain name like: DOMAIN.LOCAL
 
 OPTIONAL VALUES:
@@ -235,6 +236,8 @@ CERTIFICATE AUTHENTICATION:
       --key <key>            PEM private key for certificate authentication (use with --crt)
 
 OPTIONAL FLAGS:
+      --current-user
+          Windows only: use the logged-in domain user's credentials and discover the domain/DC automatically
   -c, --collectionmethod [<COLLECTIONMETHOD>]
           Which information to collect. Supported: All (LDAP, SMB, HTTP), DCOnly (LDAP + SYSVOL, no member-machine connections), Session (user sessions over RPC), RegistryOnly (sessions over WINREG), LdapOnly (LDAP only, no machine or SYSVOL), GPOLocalGroup (LDAP + SMB SYSVOL for read local group member over GPO), LocalGroup (LDAP + SAMR BUILTIN alias membership), WebClient (LDAP + SMB WebDAV pipe probe for IsWebClientRunning), CARegistry (LDAP + MS-RRP winreg for the CA registry values IsUserSpecifiesSanEnabled and RoleSeparationEnabled) (default: All) [possible values: All, DCOnly, Session, RegistryOnly, LdapOnly, GPOLocalGroup, LocalGroup, WebClient, CARegistry]
       --ldap-filter <ldap-filter>
@@ -281,8 +284,8 @@ rusthound-ce -d north.sevenkingdoms.local --ldaps -P 3636 -u 'jeor.mormont@north
 # Tips to redirect and append both standard output and standard error to a file > /tmp/rh_output 2>&1
 rusthound-ce -d north.sevenkingdoms.local --ldaps -u 'jeor.mormont@north.sevenkingdoms.local' -p '_L0ngCl@w_' -o /tmp/demo --fqdn-resolver > /tmp/rh_output 2>&1
 
-# Windows with GSSAPI session
-rusthound-ce.exe -d sevenkingdoms.local --ldapfqdn kingslanding
+# Windows with the current logon session
+rusthound-ce.exe --current-user -d sevenkingdoms.local --ldapfqdn kingslanding.sevenkingdoms.local
 # Windows simple bind connection username:password (do not use single or double quotes with cmd.exe)
 rusthound-ce.exe -d sevenkingdoms.local -u jeor.mormont@north.sevenkingdoms.local -p _L0ngCl@w_ -o output -z
 # Windows NT hash authentication (Pass The Hash) PTH for NTLM
@@ -294,6 +297,27 @@ rusthound-ce -d sevenkingdoms.local -f kingslanding -k -z
 # Kerberos authentication (Windows)
 rusthound-ce.exe -d sevenkingdoms.local -f kingslanding -k -z
 ```
+
+## Current Windows user
+
+On a domain-joined Windows host, the Windows build uses the current domain
+logon if launched without arguments. It locates the joined domain and a DNS
+named DC automatically. No username, password, NT hash, or ticket cache is
+needed:
+
+```powershell
+.\rusthound-ce.exe
+# Or with output options:
+.\rusthound-ce.exe --current-user -o C:\Temp\RustHound -z
+```
+
+The default collection method is `All`. LDAP binds through Windows SSPI,
+and SMB/remote registry collection uses the same logon. Use `-c LdapOnly`
+when only LDAP data is needed. `--current-user` cannot be combined with
+explicit credential or certificate options. The account's permissions and
+host reachability determine which remote modules can collect data.
+An interactive or password-backed domain logon is required for Kerberos;
+some public-key SSH logons have no usable Kerberos credential.
 
 ## Pass-the-Certificate (certificate authentication)
 

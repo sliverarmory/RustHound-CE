@@ -12,13 +12,13 @@ The release workflow builds the Windows GNU DLL with:
 
 ```sh
 cargo build --locked --release --target x86_64-pc-windows-gnu --lib \
-  --no-default-features --features nogssapi,sliver-extension
+  --features sliver-extension
 ```
 
 This GNU target is the verified Reflektor build. The MSVC build uses static PE
 TLS storage that the current Reflektor memory loader does not initialize.
 Build a manual package with `python3 scripts/package_armory.py --dll <dll> --version
-2.5.29 --out <directory>`. The script writes an extension manifest containing
+2.5.30 --out <directory>`. The script writes an extension manifest containing
 the DLL SHA-256 and a deterministic `rusthound-ce.tar.gz` archive.
 
 The tagged release job signs the tar archive with the repository's
@@ -34,21 +34,36 @@ the callback exactly once with UTF-8 JSON. All requests include `version: 1`.
 
 | Operation | Request fields | Response |
 | --- | --- | --- |
-| `start` | `domain`, `username`, `password`, optional `method`, `ldapFqdn`, `ip`, `port`, `ldaps`, `ldapFilter`, `maxBytes`, `timeoutSeconds` | `state: "running"`, `runId` |
+| `start` | `currentUser: true` for integrated Windows logon, or `domain`, `username`, `password` for explicit credentials; optional `method`, `ldapFqdn`, `ip`, `port`, `ldaps`, `ldapFilter`, `maxBytes`, `timeoutSeconds` | `state: "running"`, `runId` |
 | `status` | `runId` | `state: "running"`, `"complete"`, or `"error"`; completed runs include `size` and lowercase `sha256` |
 | `read` | `runId`, `offset`, `maxBytes` | `state: "chunk"`, `offset`, `nextOffset`, Base64 `data` |
 | `finish` | `runId` | `state: "finished"`; ZIP memory is cleared |
 | `abort` | `runId` | `state: "aborted"`; a running worker is cancelled and its slot is released after it exits |
 
-Methods are `LdapOnly` (default), `DCOnly`, and `All`. A bare username is
-expanded to `user@domain` for simple LDAP bind. Password is mandatory; the
-extension will not prompt. Current-token SSPI is not yet supported. The
-credential lives only in the active worker, not in the run registry. Operators
-should be aware that Sliver may persist beacon task requests on its server.
+Methods are `LdapOnly` (default), `DCOnly`, and `All`. To collect with the
+Windows account running the extension, start a run with:
 
-The current LDAP transport defaults to simple bind on port 389, which can send
-the password over the network without encryption. Setting `ldaps: true` uses
-TLS, but upstream RustHound currently disables DC certificate verification;
+```json
+{"version":1,"op":"start","currentUser":true,"method":"All"}
+```
+
+The extension discovers the joined domain and a DNS-named DC. `domain` and
+`ldapFqdn` may be supplied to select a particular domain and DC. LDAP uses
+the logon session's Kerberos credentials; SMB and Remote Registry use that
+same Windows identity. The process must run in a domain logon session with
+usable network credentials. `currentUser` cannot be combined with `username`
+or `password`, and requires a Windows DLL built with LDAP GSSAPI support.
+
+For explicit credentials, a bare username is expanded to `user@domain` for
+simple LDAP bind. `domain`, `username`, and `password` are mandatory in that
+mode; the extension will not prompt. The password lives only in the active
+worker, not in the run registry. Operators should be aware that Sliver may
+persist beacon task requests on its server.
+
+The explicit-credential LDAP transport defaults to simple bind on port 389,
+which can send the password over the network without encryption. Setting
+`ldaps: true` uses TLS, but upstream RustHound currently disables DC
+certificate verification;
 therefore this mode encrypts traffic without authenticating the DC. Do not
 present the LDAPS option as a verified or authenticated connection. Use only
 under a network and credential policy that permits these properties. Verified

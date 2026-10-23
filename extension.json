@@ -1,7 +1,7 @@
 {
   "name": "RustHound CE",
   "command_name": "rusthound-ce",
-  "version": "2.5.29",
+  "version": "2.5.30",
   "extension_author": "sliverarmory",
   "original_author": "g0h4n",
   "repo_url": "https://github.com/sliverarmory/RustHound-CE",

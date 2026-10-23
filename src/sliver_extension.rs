@@ -47,6 +47,8 @@ struct Request {
     version: u8,
     op: String,
     run_id: Option<String>,
+    #[serde(default)]
+    current_user: bool,
     domain: Option<String>,
     method: Option<String>,
     username: Option<String>,
@@ -73,18 +75,32 @@ fn bounded_text(value: Option<String>, field: &str, max: usize) -> Result<String
     Ok(value)
 }
 
-fn start(req: Request) -> Result<Value, String> {
-    let domain = bounded_text(req.domain, "domain", 253)?;
-    if !domain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+fn start_options(req: Request) -> Result<(Options, usize, u64), String> {
+    let domain = if req.current_user && req.domain.is_none() {
+        String::new()
+    } else {
+        bounded_text(req.domain, "domain", 253)?
+    };
+    if !domain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
         return Err("domain is invalid".into());
     }
-    let username = bounded_text(req.username, "username", 256)?;
-    if username.contains('\\') {
-        return Err("username must be a UPN or bare account name".into());
-    }
-    // Requiring a password prevents RustHound's CLI-oriented auth path from
-    // prompting inside an implant. Current-token SSPI is not supported here.
-    let password = bounded_text(req.password, "password", 1024)?;
+    let (username, password) = if req.current_user {
+        if req.username.is_some() || req.password.is_some() {
+            return Err("currentUser cannot be combined with username or password".into());
+        }
+        (None, None)
+    } else {
+        let username = bounded_text(req.username, "username", 256)?;
+        if username.contains('\\') {
+            return Err("username must be a UPN or bare account name".into());
+        }
+        // Explicit authentication must never prompt inside an implant.
+        let password = bounded_text(req.password, "password", 1024)?;
+        (Some(username), Some(password))
+    };
     let method = match req.method.as_deref().unwrap_or("LdapOnly") {
         "LdapOnly" => CollectionMethod::LdapOnly,
         "DCOnly" => CollectionMethod::DCOnly,
@@ -99,7 +115,9 @@ fn start(req: Request) -> Result<Value, String> {
     if !(1..=MAX_TIMEOUT_SECS).contains(&timeout_seconds) {
         return Err("timeoutSeconds is outside the supported range".into());
     }
-    let ldap_filter = req.ldap_filter.unwrap_or_else(|| "(objectClass=*)".to_owned());
+    let ldap_filter = req
+        .ldap_filter
+        .unwrap_or_else(|| "(objectClass=*)".to_owned());
     if ldap_filter.is_empty() || ldap_filter.len() > 1024 || ldap_filter.contains('\0') {
         return Err("ldapFilter is invalid".into());
     }
@@ -109,12 +127,14 @@ fn start(req: Request) -> Result<Value, String> {
         }
     }
     if let Some(ref ip) = req.ip {
-        ip.parse::<std::net::IpAddr>().map_err(|_| "ip is invalid")?;
+        ip.parse::<std::net::IpAddr>()
+            .map_err(|_| "ip is invalid")?;
     }
     let options = Options {
         domain,
-        username: Some(username),
-        password: Some(password),
+        current_user: req.current_user,
+        username,
+        password,
         ldapfqdn: req.ldap_fqdn,
         ip: req.ip,
         port: req.port,
@@ -137,6 +157,17 @@ fn start(req: Request) -> Result<Value, String> {
         cache_buffer_size: 0,
         resume: false,
     };
+    Ok((options, max_bytes, timeout_seconds))
+}
+
+fn start(req: Request) -> Result<Value, String> {
+    let (options, max_bytes, timeout_seconds) = start_options(req)?;
+    if options.current_user && !cfg!(windows) {
+        return Err("currentUser requires a Windows build".into());
+    }
+    if options.current_user && cfg!(feature = "nogssapi") {
+        return Err("currentUser requires an Armory build with LDAP GSSAPI support".into());
+    }
 
     let id = format!("{:016x}", NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let cancel = Arc::new(AtomicBool::new(false));
@@ -145,7 +176,11 @@ fn start(req: Request) -> Result<Value, String> {
         if slot.is_some() {
             return Err("a collection is already registered; finish or abort it first".into());
         }
-        *slot = Some(Run { id: id.clone(), cancel: cancel.clone(), phase: Phase::Running });
+        *slot = Some(Run {
+            id: id.clone(),
+            cancel: cancel.clone(),
+            phase: Phase::Running,
+        });
     }
 
     let worker_id = id.clone();
@@ -164,7 +199,9 @@ fn start(req: Request) -> Result<Value, String> {
                             // Abort does not free the slot until the worker has
                             // stopped, preventing overlapping collectors.
                             *slot = None;
-                            if let Ok(mut zip) = result { zip.fill(0); }
+                            if let Ok(mut zip) = result {
+                                zip.fill(0);
+                            }
                             return;
                         }
                         run.phase = match result {
@@ -206,6 +243,27 @@ fn collect(
     let result = runtime.block_on(async {
         tokio::select! {
             result = async {
+                if options.current_user {
+                    #[cfg(windows)]
+                    {
+                        let domain = options.domain.clone();
+                        let discovered = tokio::task::spawn_blocking(move || {
+                            crate::transport::windows_domain::discover_domain_controller(
+                                if domain.is_empty() { None } else { Some(&domain) },
+                            )
+                        })
+                        .await
+                        .map_err(|e| format!("domain discovery task failed: {e}"))??;
+                        if options.domain.is_empty() {
+                            options.domain = discovered.domain;
+                        }
+                        if options.ldapfqdn.is_none() {
+                            options.ldapfqdn = Some(discovered.dc_fqdn);
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    return Err("currentUser requires a Windows build".into());
+                }
                 let mut ldap = ldap_auth(&options).await.map_err(|e| e.to_string())?;
                 let result = run_collection_to_zip(&mut ldap, &options, max_bytes)
                     .await.map_err(|e| e.to_string());
@@ -220,6 +278,7 @@ fn collect(
             } => Err("collection aborted".into()),
         }
     });
+    runtime.shutdown_timeout(Duration::from_secs(5));
     // This does not remove copies inside third-party auth libraries, but keeps
     // the extension's own credential copy out of long-lived run state.
     if let Some(mut password) = options.password.take() {
@@ -241,8 +300,12 @@ fn status(req: &Request) -> Result<Value, String> {
     let run = find_run(&mut slot, req)?;
     Ok(match &run.phase {
         Phase::Running => json!({"version": PROTOCOL_VERSION, "state": "running", "runId": run.id}),
-        Phase::Complete { zip, sha256 } => json!({"version": PROTOCOL_VERSION, "state": "complete", "runId": run.id, "size": zip.len(), "sha256": sha256}),
-        Phase::Error(message) => json!({"version": PROTOCOL_VERSION, "state": "error", "runId": run.id, "error": message}),
+        Phase::Complete { zip, sha256 } => {
+            json!({"version": PROTOCOL_VERSION, "state": "complete", "runId": run.id, "size": zip.len(), "sha256": sha256})
+        }
+        Phase::Error(message) => {
+            json!({"version": PROTOCOL_VERSION, "state": "error", "runId": run.id, "error": message})
+        }
     })
 }
 
@@ -262,7 +325,9 @@ fn read(req: &Request) -> Result<Value, String> {
             }
             let next = offset.saturating_add(max_bytes).min(zip.len());
             let data = base64::engine::general_purpose::STANDARD.encode(&zip[offset..next]);
-            Ok(json!({"version": PROTOCOL_VERSION, "state": "chunk", "runId": run.id, "offset": offset, "nextOffset": next, "data": data}))
+            Ok(
+                json!({"version": PROTOCOL_VERSION, "state": "chunk", "runId": run.id, "offset": offset, "nextOffset": next, "data": data}),
+            )
         }
         Phase::Running => Err("collection is still running".into()),
         Phase::Error(message) => Err(message.clone()),
@@ -286,7 +351,9 @@ fn finish(req: &Request, abort: bool) -> Result<Value, String> {
             }
         }
     }
-    Ok(json!({"version": PROTOCOL_VERSION, "state": if abort { "aborted" } else { "finished" }, "runId": id}))
+    Ok(
+        json!({"version": PROTOCOL_VERSION, "state": if abort { "aborted" } else { "finished" }, "runId": id}),
+    )
 }
 
 fn dispatch(bytes: &[u8]) -> Value {
@@ -330,9 +397,13 @@ pub unsafe extern "system" fn RustHoundCE(
             dispatch(std::slice::from_raw_parts(request, length as usize))
         }
     });
-    let bytes = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"version\":1,\"state\":\"error\",\"error\":\"response serialization failed\"}".to_vec());
+    let bytes = serde_json::to_vec(&response).unwrap_or_else(|_| {
+        b"{\"version\":1,\"state\":\"error\",\"error\":\"response serialization failed\"}".to_vec()
+    });
     match callback {
-        Some(callback) if bytes.len() <= i32::MAX as usize => callback(bytes.as_ptr(), bytes.len() as i32),
+        Some(callback) if bytes.len() <= i32::MAX as usize => {
+            callback(bytes.as_ptr(), bytes.len() as i32)
+        }
         _ => 1,
     }
 }
@@ -344,8 +415,58 @@ mod tests {
     #[test]
     fn rejects_interactive_or_unsupported_requests() {
         assert_eq!(dispatch(br#"{"version":1,"op":"start","domain":"example.local","username":"user","method":"LdapOnly"}"#)["state"], "error");
-        assert_eq!(dispatch(br#"{"version":2,"op":"status","runId":"1"}"#)["error"], "unsupported protocol version");
-        assert_eq!(dispatch(br#"{"version":1,"op":"read","runId":"1","offset":0,"maxBytes":32769}"#)["state"], "error");
+        assert_eq!(
+            dispatch(br#"{"version":2,"op":"status","runId":"1"}"#)["error"],
+            "unsupported protocol version"
+        );
+        assert_eq!(
+            dispatch(br#"{"version":1,"op":"read","runId":"1","offset":0,"maxBytes":32769}"#)
+                ["state"],
+            "error"
+        );
+    }
+
+    #[test]
+    fn current_user_request_omits_credentials_and_can_discover_domain() {
+        let req: Request = serde_json::from_slice(
+            br#"{"version":1,"op":"start","currentUser":true,"method":"All"}"#,
+        )
+        .unwrap();
+        let (options, _, _) = start_options(req).unwrap();
+        assert!(options.current_user);
+        assert_eq!(options.domain, "");
+        assert!(options.username.is_none());
+        assert!(options.password.is_none());
+        assert!(matches!(options.collection_method, CollectionMethod::All));
+    }
+
+    #[test]
+    fn current_user_rejects_explicit_credentials() {
+        for field in ["username", "password"] {
+            let mut request = json!({"version": 1, "op": "start", "currentUser": true});
+            request[field] = json!("value");
+            let req: Request = serde_json::from_value(request).unwrap();
+            assert_eq!(
+                start_options(req).err().as_deref(),
+                Some("currentUser cannot be combined with username or password")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_credentials_remain_supported() {
+        let req: Request = serde_json::from_slice(
+            br#"{"version":1,"op":"start","domain":"example.local","username":"user","password":"secret"}"#,
+        ).unwrap();
+        let (options, _, _) = start_options(req).unwrap();
+        assert!(!options.current_user);
+        assert_eq!(options.domain, "example.local");
+        assert_eq!(options.username.as_deref(), Some("user"));
+        assert_eq!(options.password.as_deref(), Some("secret"));
+        assert!(matches!(
+            options.collection_method,
+            CollectionMethod::LdapOnly
+        ));
     }
 
     #[test]

@@ -15,8 +15,8 @@
 //! Domain-Controller-free logic and its unit tests live in [`types`].
 //! `run_modules` gates this module behind `!cert_auth`, as it does the other
 //! SMB-based modules. dcerpc's `RegistryClient` binds with a password or an
-//! NT hash only (no Kerberos bind yet); a run with neither records the
-//! values as not collected.
+//! NT hash; current-user mode uses Windows Remote Registry with the process
+//! logon session instead.
 
 pub mod careg;
 pub mod types;
@@ -82,7 +82,7 @@ pub async fn run(args: &Options, cas: &mut [EnterpriseCA]) -> Result<(), Box<dyn
     // Without a password or NT hash, don't attempt a doomed bind against every
     // CA: record the read as not collected, with the reason, so BloodHound
     // sees Collected:false rather than a false default.
-    if rrp_bind_unavailable(&password, nt_hash.as_ref()) {
+    if !args.current_user && rrp_bind_unavailable(&password, nt_hash.as_ref()) {
         let reason = RRP_NEEDS_SECRET.to_string();
         info!(
             "[careg] no password or NT hash available - not reading CA registry on {} CA(s)",
@@ -96,22 +96,28 @@ pub async fn run(args: &Options, cas: &mut [EnterpriseCA]) -> Result<(), Box<dyn
     }
 
     info!(
-        "[careg] reading CA registry over MS-RRP on {} of {} CA(s)",
+        "[careg] reading CA registry over Remote Registry on {} of {} CA(s)",
         targets.len(),
         cas.len()
     );
 
     // Read with bounded concurrency; order is preserved by join_all.
     let sem = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
+    let current_user = args.current_user;
     let reads = future::join_all(targets.into_iter().map(|(idx, host, ca_name)| {
         let (sem, signin_domain, user, password) =
             (sem.clone(), signin_domain.clone(), user.clone(), password.clone());
         async move {
             let _permit = sem.acquire().await.unwrap();
             trace!("[careg] [{host}] permit acquired, reading CA '{ca_name}'");
-            let reads =
-                careg::collect(&host, &signin_domain, &user, &password, nt_hash.as_ref(), &ca_name)
-                    .await;
+            let reads = if current_user {
+                #[cfg(windows)]
+                { careg::collect_current_user(&host, &ca_name).await }
+                #[cfg(not(windows))]
+                { unreachable!("current-user mode is only available on Windows") }
+            } else {
+                careg::collect(&host, &signin_domain, &user, &password, nt_hash.as_ref(), &ca_name).await
+            };
             (idx, reads)
         }
     }))

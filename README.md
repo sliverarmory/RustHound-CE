@@ -63,6 +63,22 @@ Here's an example of a command to collect domain objects and obtain the zip arch
 rusthound-ce -d DOMAIN.LOCAL -u USERNAME@DOMAIN.LOCAL -z
 ```
 
+On a domain-joined Windows host, run the Windows build under a domain account
+to use that account's logon credentials. Running it with no arguments selects
+the current-user mode, discovers the domain and a DC, and uses the default
+`All` collection method:
+
+```powershell
+.\rusthound-ce.exe
+```
+
+Use `--current-user` to add other options, such as `-z` for a ZIP archive or
+`-c LdapOnly` for LDAP-only collection. The account needs access to the
+requested LDAP, SMB, and remote registry data; per-host failures are reported
+in the collection output. Use an interactive or password-backed domain logon;
+some public-key SSH logons have no Kerberos credentials despite showing a
+domain username.
+
 More information and examples with how to compile RustHound-CE or how to use RustHound-CE can be found directly on the [help page](HELP.md).
 
 # Special thanks to 

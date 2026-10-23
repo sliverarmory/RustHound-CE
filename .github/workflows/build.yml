@@ -88,7 +88,7 @@ jobs:
           key: kfw-4.1-amd64
 
       - name: Install MIT Kerberos (Windows MSVC)
-        # Only the MSVC build links GSSAPI; the GNU build uses --features nogssapi.
+        # Keep MIT Kerberos for MSVC; the GNU build uses Windows SSPI for GSSAPI.
         if: matrix.platform.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
@@ -178,14 +178,15 @@ jobs:
             # Native Linux build
             cargo build --verbose --locked --release --target ${{ matrix.platform.target }} $NOGSSAPI_FLAGS
           elif [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Cross-compile Linux or Windows (GNU) build
+            # Cross-compile the non-native Linux targets
             cross build --verbose --locked --release --target ${{ matrix.platform.target }} --features nogssapi --no-default-features
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             # Native macOS build
             cargo build --verbose --locked --release --target ${{ matrix.platform.target }} $NOGSSAPI_FLAGS
           else
-            # Native Windows (MSVC) build
-            cargo build --verbose --locked --release --target ${{ matrix.platform.target }}
+            # Native Windows executable (GNU and MSVC). Build the binary
+            # target so the separate Armory cdylib does not get linked here.
+            cargo build --verbose --locked --release --target ${{ matrix.platform.target }} --bin rusthound-ce
           fi
 
       - name: Remove Cross.toml if exists

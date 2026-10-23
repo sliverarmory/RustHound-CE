@@ -20,6 +20,7 @@
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let options = Options {
 //!     domain: "essos.local".to_string(),
+//!     current_user: false,
 //!     username: Some("daenerys.targaryen@essos.local".to_string()),
 //!     password: Some("BurnThemAll!".to_string()),
 //!     ldapfqdn: Some("meereen.essos.local".to_string()),

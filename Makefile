@@ -56,12 +56,12 @@ install_windows_deps: update_rustup
 	@rustup target add i686-pc-windows-gnu
 
 build_windows_x64:
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-pc-windows-gnu
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-pc-windows-gnu --bin $(prog)
 	cp target/x86_64-pc-windows-gnu/release/$(prog).exe .
 	@echo -e "[+] You can find \033[1;32m$(prog).exe\033[0m in your current folder."
 
 build_windows_x86:
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target i686-pc-windows-gnu
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target i686-pc-windows-gnu --bin $(prog)
 	cp target/i686-pc-windows-gnu/release/$(prog).exe ./$(prog)_x86.exe
 	@echo -e "[+] You can find \033[1;32m$(prog)_x86.exe\033[0m in your current folder."
 
@@ -72,7 +72,7 @@ windows_x64: check_rustup install_windows_deps build_windows_x64
 windows_x86: check_rustup install_windows_deps build_windows_x86
 
 build_windows_noargs:
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-pc-windows-gnu --features noargs
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-pc-windows-gnu --features noargs --bin $(prog)
 	cp target/x86_64-pc-windows-gnu/release/$(prog).exe ./$(prog)_noargs.exe
 	@echo -e "[+] You can find \033[1;32m$(prog)_noargs.exe\033[0m in your current folder."
 
